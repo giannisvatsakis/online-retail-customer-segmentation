@@ -1,0 +1,526 @@
+---
+title: "Customer Segmentation: A Clustering Analysis"
+author: "Giannis Vatsakis"
+output: 
+  html_document:
+    theme: simplex
+    toc: TRUE
+    toc_float: TRUE
+    df_print: "kable"
+editor_options:
+  chunk_output_type: console
+---
+
+# 1. Introduction
+
+This analysis applies RFM (Recency, Frequency, Monetary) feature engineering combined with K-Means and Hierarchical clustering to identify meaningful customer segments from real-world transactional data.
+
+Customer segmentation is the process of dividing a customer base into distinct groups based on shared behavioral characteristics. 
+
+Understanding these groups allows businesses to tailor marketing strategies, improve customer experience, and allocate resources more effectively.
+
+---
+
+
+
+# 2. Load Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+
+library(readxl)       # for loading .xlsx files
+library(dplyr)        # data manipulation
+library(ggplot2)      # visualization
+library(tidyr)        # data tidying
+library(cluster)      # clustering algorithms
+library(factoextra)   # cluster visualization
+library(reshape2)     # correlation matrix melting
+
+```
+
+---
+
+
+
+# 3. Load & Inspect Data
+
+```{r load-inspect-data}
+
+retail_data <- read_excel("data/Online Retail.xlsx")
+
+head(retail_data)
+str(retail_data)
+summary(retail_data)
+dim(retail_data)      # data dimensions before cleaning
+
+```
+
+
+
+# 4. Data Preparation & Cleaning
+
+```{r data-prep-cleaning}
+
+# Check missing values
+colSums(is.na(retail_data))
+
+# Remove rows with missing CustomerID
+retail_data <- retail_data %>%
+  filter(!is.na(CustomerID))
+
+# Remove cancelled orders (InvoiceNo starting with "C")
+retail_data <- retail_data %>%
+  filter(!grepl("^C", InvoiceNo))
+
+# Remove negative or zero Quantity and UnitPrice
+retail_data <- retail_data %>%
+  filter(Quantity > 0, UnitPrice > 0)
+
+# Check final dimensions
+nrow(retail_data)
+
+```
+
+**Comment:**
+Transactions with missing CustomerID were removed as they cannot be assigned to a specific customer, which is essential for RFM analysis. Cancelled invoices and transactions with non-positive quantities(product returns) or prices are also excluded to ensure the analysis reflects valid purchase behavior only.
+
+About 144,000 rows of noise, meaning cancelled orders, missing customers or bad entries were removed from the dataset.
+
+
+
+# 5. RFM Feature Engineering 
+
+```{r rfm-engineering}
+
+# Set reference date as one day after the last transaction
+reference_date <- max(retail_data$InvoiceDate) + 1
+
+# Create a TotalSpend column
+retail_data <- retail_data %>%
+  mutate(TotalSpend = Quantity * UnitPrice)
+
+# Calculate RFM per customer
+rfm_data <- retail_data %>%
+  group_by(CustomerID) %>%
+  summarise(
+    Recency    = as.numeric(reference_date - max(InvoiceDate)),
+    Frequency  = n_distinct(InvoiceNo),
+    Monetary   = sum(TotalSpend)
+  ) %>%
+  ungroup()
+
+head(rfm_data)
+summary(rfm_data)
+dim(rfm_data)
+
+```
+
+**Comment:**
+RFM analysis quantifies customer behavior across three dimensions. Recency measures the number of days since a customer last made a purchase. Frequency captures how many distinct transactions a customer completed and monetary reflects the total amount spent during the observation period.
+
+The unique customers, which is the real sample size of the project, are 4338.
+
+
+
+# 6. Exploratory Data Analysis
+
+## 6.1: Distribution of RFM Variables
+
+```{r eda, message=FALSE, warning=FALSE}
+
+ggplot(rfm_data, aes(x = Recency)) +
+  geom_histogram(fill = "steelblue", bins = 50, color = "black") +
+  labs(title = "Recency Distribution", x = "Days Since Last Purchase", y = "Count") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(rfm_data, aes(x = Frequency)) +
+  geom_histogram(fill = "steelblue", bins = 50, color = "black") +
+  labs(title = "Frequency Distribution", x = "Number of Transactions", y = "Count") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(rfm_data, aes(x = Monetary)) +
+  geom_histogram(fill = "steelblue", bins = 50, color = "black") +
+  labs(title = "Monetary Distribution", x = "Total Money Spend (£)", y = "Count") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Interpretation:**
+All three RFM variables exhibit strong right-skewed distributions, with the majority of customers concentrated at lower values and a small number of extreme outliers pulling the distributions to the right. This skewness, particularly visible in Monetary and Frequency, highlights the need for log transformation and scaling prior to clustering to prevent outliers from dominating the results.
+
+---
+
+## 6.2: Pearson Correlation Check
+
+```{r correlation}
+
+# Correlation matrix
+cor_matrix <- cor(rfm_data[, c("Recency", "Frequency", "Monetary")])
+
+cor_melt <- melt(cor_matrix)
+
+ggplot(cor_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limit = c(-1, 1),
+                       name = "Correlation") +
+  theme_minimal() +
+  geom_text(aes(label = round(value, 2)), color = "black", size = 4) +
+  labs(title = "RFM Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Interpretation:**
+Frequency and Monetary value show a moderate positive correlation, which is expected as customers who transact more frequently tend to accumulate higher total spend. Recency shows a weak negative relationship with both variables, suggesting that customers who purchased more recently tend to be slightly more active.
+
+---
+
+
+
+# 7. Data Transformation
+
+```{r transformation}
+
+# Log transformation to reduce skewness
+rfm_log <- rfm_data %>%
+  mutate(
+    Recency   = log1p(Recency),               # lo1p(x) = log(1 + x)  to avoid log(0)
+    Frequency = log1p(Frequency),
+    Monetary  = log1p(Monetary)
+  )
+
+# Scale to mean = 0, sd = 1
+rfm_scaled <- rfm_log %>%
+  select(Recency, Frequency, Monetary) %>%
+  scale() %>%
+  as.data.frame()
+
+summary(rfm_scaled)
+
+```
+
+**Comment:**
+Log transformation is applied to all three RFM variables to reduce the impact of extreme outliers. The transformed variables are then standardized to zero mean and unit variance, ensuring that no single variable dominates the clustering process due to differences in scale.
+
+
+
+# 8. K-Means Clustering
+
+## 8.1: Elbow Method
+
+```{r elbow, message=FALSE, warning=FALSE}
+
+set.seed(123)
+
+fviz_nbclust(rfm_scaled, kmeans, method = "wss") +
+  labs(title = "Elbow Method - Optimal Number of Clusters") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Interpretation:**
+The elbow plot displays the total within-cluster sum of squares for increasing values of k. As the number of clusters increases, the within-cluster variance decreases. However, the rate of improvement slows after a certain point. The elbow observed in the plot suggests that approximately 3 clusters provide a reasonable balance between model simplicity and cluster separation.
+
+---
+
+## 8.2: Silhouette Method
+
+```{r silhouette-kmeans, message=FALSE, warning=FALSE}
+
+fviz_nbclust(rfm_scaled, kmeans, method = "silhouette") +
+  labs(title = "Silhouette Method - Optimal Number of Clusters") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Interpretation:**
+The silhouette method measures how similar each customer is to their own cluster compared to other clusters. Higher silhouette values indicate better separation between clusters. The optimal number of clusters corresponds to the value of k that maximizes the average silhouette score, in our case k = 2.
+
+---
+
+## 8.3: Fit K-Means Model
+
+The elbow method suggests that the reduction in within-cluster variance slows noticeably after approximately three clusters, whereas the silhouette method indicates that two clusters provide the highest separation. However, using only two clusters may oversimplify customer behavior as the customers are separated into "good" and "bad" with no between. Therefore, three clusters were selected as it gives more interpretable groups.
+
+```{r kmeans-model}
+
+set.seed(123)
+
+k <- 3
+
+kmeans_model <- kmeans(
+  rfm_scaled,
+  centers = k,
+  nstart  = 25
+)
+
+rfm_data$kmeans_cluster <- as.factor(kmeans_model$cluster)      # assign customer to cluster
+
+table(rfm_data$kmeans_cluster)
+
+```
+
+**Comment:**
+To improve the stability of the solution, the algorithm was run multiple times with different initial starting points. Each customer was then assigned to a cluster, allowing the RFM dataset to be used for cluster profiling and interpretation.
+
+---
+
+
+
+# 9. Hierarchical Clustering
+
+```{r hierarchical, message=FALSE, warning=FALSE}
+
+# Use a sample for dendrogram readability
+set.seed(123)
+sample_index <- sample(nrow(rfm_scaled), 200)
+rfm_sample <- rfm_scaled[sample_index, ]
+
+# Compute distance matrix
+dist_matrix <- dist(rfm_sample, method = "euclidean")
+
+# Fit hierarchical clustering
+hc_model <- hclust(dist_matrix, method = "ward.D2")
+
+# Plot dendrogram
+fviz_dend(hc_model,
+          k = 3,
+          rect = TRUE,
+          rect_fill = TRUE,
+          show_labels = FALSE,
+          main = "Hierarchical Clustering Dendrogram",
+          xlab = "Customers",
+          ylab = "Height") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Comment:**
+Hierarchical clustering is performed on a random sample of 200 customers to keep the dendrogram readable. With the full dataset the visualization becomes too dense to interpret clearly. Ward's method is used because it tends to produce compact clusters and is commonly applied in customer segmentation analyses.
+
+---
+
+```{r hc-assign}
+
+# Assign hierarchical clusters to full dataset
+hc_full <- hclust(dist(rfm_scaled, method = "euclidean"), method = "ward.D2")
+
+rfm_data$hc_cluster <- as.factor(cutree(hc_full, k = 3))
+
+table(rfm_data$hc_cluster)
+
+```
+
+**Comment:**
+Hierarchical clustering is refitted on the full dataset to assign cluster labels to all customers. The tree is cut at three clusters to remain consistent with the segmentation obtained from the K-means model.
+
+---
+
+
+# 10. Cluster Evaluation
+
+The silhouette score evaluates how well observations fit within their assigned cluster compared to neighboring clusters. Values range from −1 to 1, with higher values indicating better separation between clusters. The scores for both clustering approaches are compared in order to assess which method produces more cohesive and clearly separated customer segments.
+
+
+```{r evaluation, message=FALSE, warning=FALSE}
+
+# Silhouette score for K-Means
+sil_kmeans <- silhouette(kmeans_model$cluster, dist(rfm_scaled))
+kmeans_score <- mean(sil_kmeans[, 3])
+
+# Silhouette score for Hierarchical
+sil_hc <- silhouette(as.integer(rfm_data$hc_cluster), dist(rfm_scaled))
+hc_score <- mean(sil_hc[, 3])
+
+# Compare results
+comparison <- data.frame(
+  Model = c("K-Means", "Hierarchical"),
+  Silhouette_Score = round(c(kmeans_score, hc_score), 4)
+)
+
+print(comparison)
+
+# Visualization
+ggplot(comparison, aes(x = Model, y = Silhouette_Score, fill = Model)) +
+  geom_col(width = 0.4) +
+  geom_text(aes(label = Silhouette_Score), vjust = -0.5, size = 5) +
+  labs(
+    title = "Silhouette Score Comparison: K-Means vs Hierarchical",
+    y = "Average Silhouette Width",
+    x = "Model"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+
+```
+
+**Interpretation:**
+The results indicate that the K-means clustering model achieves a slightly higher silhouette score than the hierarchical clustering approach, suggesting that it produces more clearly separated customer segments.
+
+---
+
+# 11. Cluster Profiling & Visualization
+
+## 11.1: Cluster Profiles
+
+```{r profiling}
+
+cluster_profiles <- rfm_data %>%
+  group_by(kmeans_cluster) %>%
+  summarise(
+    Customers  = n(),
+    Recency    = round(mean(Recency), 1),
+    Frequency  = round(mean(Frequency), 1),
+    Monetary   = round(mean(Monetary), 1)
+  )
+
+print(cluster_profiles)
+
+```
+
+**Interpretation:**
+Each cluster is summarized by its average RFM values to understand the behavioral profile of its customers. Lower recency indicates more recently active customers, while higher frequency and monetary values reflect greater engagement and spending.
+
+---
+
+## 11.2: Cluster Visualization
+
+```{r cluster-plot}
+
+fviz_cluster(kmeans_model,
+             data = rfm_scaled,
+             geom = "point",
+             ellipse.type = "convex",
+             ggtheme = theme_minimal(),
+             main = "K-Means Customer Segments (PCA)") +
+  theme(plot.title = element_text(hjust = 0.5))
+             
+
+
+```
+
+**Comment:**
+Since the RFM data has three dimensions, Principal Component Analysis is applied to reduce it to two dimensions for visualization. Each point represents a customer and colors indicate the cluster they belong to.
+
+---
+
+## 11.3: RFM Box Plots by Cluster
+
+```{r boxplots}
+
+rfm_long <- rfm_data %>%
+  select(kmeans_cluster, Recency, Frequency, Monetary) %>%
+  pivot_longer(cols = c(Recency, Frequency, Monetary),
+               names_to = "Metric",
+               values_to = "Value")
+
+ggplot(rfm_long, aes(x = kmeans_cluster, y = Value, fill = kmeans_cluster)) +
+  geom_boxplot() +
+  facet_wrap(~ Metric, scales = "free_y") +
+  labs(
+    title = "RFM Distribution by Customer Segment",
+    x = "Cluster",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+
+```
+
+**Interpretation:**
+The box plots reveal how each cluster differs across all three RFM dimensions simultaneously, confirming that the clusters represent genuinely distinct customer behavioral profiles rather than arbitrary groupings.
+
+---
+
+## 11.4: Customer Segments
+
+```{r cluster-names}
+
+rfm_data$segment <- recode(rfm_data$kmeans_cluster,
+  "1" = "High Value Customers (VIP)",
+  "2" = "Inactive-Low Value Customers",
+  "3" = "Developing Customers"
+)
+
+table(rfm_data$segment)
+
+```
+
+**Interpretation:**
+Three distinct customer segments were identified.
+
+1) High value customers represent the most valuable customers, combining recent activity, high purchase frequency, and the highest average spend. 
+
+2) Inactive - Low value customers who are characterized by prolonged inactivity and minimal engagement, suggesting these customers may have churned. 
+
+3) Developing customers show recent activity and moderate spending levels but low purchase frequency. These customers may offer opportunities for growth through targeted promotions or engagement strategies aimed at increasing purchase frequency.
+
+---
+
+## 11.5: Customer Segment Size Distribution
+
+```{r cluster-size-distribution}
+
+ggplot(rfm_data, aes(x = segment , fill = segment)) +
+  geom_bar() +
+  labs(
+    title = "Customer Distribution Across Segments",
+    x = "Segment",
+    y = "Number of Customers"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none"
+        )
+
+```
+
+**Interpretation**
+Most customers fall into the inactive, low-value segment, indicating that a large portion of the customer base has limited engagement with the business. Although high-value customers represent the smallest group, they generate the highest spending and are therefore particularly important to retain. The developing customer segment forms a substantial middle group, suggesting an opportunity to increase revenue by encouraging these customers to purchase more frequently.
+
+---
+
+
+
+# 12. Key Insights
+
+Based on the RFM analysis and clustering results, three distinct customer segments were identified, each displaying different purchasing behaviors and levels of engagement with the business.
+
+ - High value customers (VIP) represent the smallest but most valuable group of customers. They purchase frequently, spend significantly more than other customers, and have made recent transactions. Retaining these customers should be a key priority, as they contribute a disproportionate share of total revenue.
+
+ - Inactive - Low value customers form the largest segment. Their high recency values, low purchase frequency, and low spending suggest that many of these customers have disengaged from the business. Targeted reactivation campaigns may help recover some of this segment.
+
+ - Developing customers show relatively recent activity and moderate spending but lower purchase frequency. This group represents customers who are engaged but not yet highly valuable. With targeted promotions or personalized communication, some of these customers could transition into the High Value segment.
+
+ - The RFM framework proved effective in capturing meaningful differences in customer behavior. The three metrics—recency, frequency, and monetary value—clearly differentiated customer engagement levels and spending patterns.
+
+ - Comparing the clustering approaches showed that K-means produced slightly better cluster separation than hierarchical clustering, achieving an average silhouette score of 0.34 compared to 0.30. This suggests that centroid-based clustering is better suited to this dataset.
+
+---
+
+
+
+# 13. Conclusion and Business Implications
+
+This project applied RFM analysis and clustering techniques to identify distinct customer segments based on purchasing behavior. Transaction-level retail data was first cleaned and aggregated to construct Recency, Frequency, and Monetary metrics for each customer. These features were then used to perform unsupervised customer segmentation.
+
+Both K-Means and Hierarchical clustering methods were explored. Cluster validation using the silhouette score indicated that the K-Means model produced slightly better separation between customer groups. The analysis ultimately identified three distinct customer segments: High Value , Lost-Low Value and Developing.
+
+The results highlight clear differences in customer engagement and spending patterns. While high value customers represent a smaller proportion of the customer base, they generate the highest revenue and should be prioritized for retention strategies. Developing customers represent a promising segment that could transition into high-value customers through targeted engagement. In contrast, the large group of inactive-low value customers highlights potential opportunities for reactivation campaigns.
+
+Overall, the segmentation demonstrates how simple behavioral metrics can reveal meaningful patterns in customer data. Such insights can support more targeted marketing strategies, improved customer retention, and better allocation of business resources.
+
+
+---
+

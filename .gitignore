@@ -1,0 +1,19 @@
+# R / RStudio session files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+
+# R Markdown outputs
+*.html
+!outputs/segmentation.html
+*.pdf
+*.docx
